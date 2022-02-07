@@ -1,0 +1,4 @@
+[submodule "phys_shared"]
+	path = phys_shared
+	url = https://github.com/NVIDIAGameWorks/PhysX
+	branch = 4.1
