@@ -40,28 +40,72 @@ CPhysicNovodex	NovodexPhysic;
 IPhysicLayer	*WorldPhysic = &NovodexPhysic;
 
 // exports given from physics SDK
-static NxPhysicsSDK* (__cdecl *pNxCreatePhysicsSDK)( 
-	NxU32 sdkVersion, 
-	NxUserAllocator* allocator, 
-	NxUserOutputStream* outputStream,
-	const NxPhysicsSDKDesc& desc, 
-	NxSDKCreateError *errorCode
+static PxPhysics* (__cdecl *pPxCreatePhysics)( 
+	PxU32 version,
+	PxFoundation& foundation,
+	const PxTolerancesScale& scale,											
+	bool trackOutstandingAllocations,
+	PxPvd* pvd
 );
-static NxCookingInterface *(__cdecl *pNxGetCookingLib)( NxU32 sdk_version_number );
-static void *(__cdecl *pNxReleasePhysicsSDK)( NxPhysicsSDK *sdk );
-static NxUtilLib* (__cdecl *pNxGetUtilLib)( void );
+
+static PxCooking *(__cdecl *pPxCreateCooking)(
+	PxU32 version,
+	PxFoundation& foundation,
+	const PxCookingParams& params
+);
+
+static PxFoundation *(__cdecl *pPxCreateFoundation)(
+	PxU32 version,
+	PxAllocatorCallback& allocator,
+	PxErrorCallback& errorCallback
+);
 
 static dllfunc_t NxPhysics[] =
 {
-{ "NxCreatePhysicsSDK",	(void **)&pNxCreatePhysicsSDK },
-{ "NxReleasePhysicsSDK",	(void **)&pNxReleasePhysicsSDK },
-{ "NxGetCookingLib",	(void **)&pNxGetCookingLib },
-{ "NxGetUtilLib",		(void **)&pNxGetUtilLib },
+{ "PxCreatePhysics",	(void **)&pPxCreatePhysics },
+{ "PxCreateCooking",	(void **)&pPxCreateCooking },
+{ "PxCreateFoundation",	(void **)&pPxCreateFoundation },
 { NULL, NULL },
 };
 
 static dllhandle_t hPhysics = NULL;
 
+class ErrorCallback : public PxErrorCallback
+{
+public:
+	virtual void reportError( PxErrorCode::Enum code, const char* message, const char* file, int line )
+	{
+		switch ( code )
+		{
+		case PxErrorCode::eINVALID_PARAMETER:
+			ALERT( at_error, "invalid parameter: %s\n", message );
+			break;
+		case PxErrorCode::eINVALID_OPERATION:
+			ALERT( at_error, "invalid operation: %s\n", message );
+			break;
+		case PxErrorCode::eOUT_OF_MEMORY:
+			ALERT( at_error, "out of memory: %s\n", message );
+			break;
+		case PxErrorCode::eDEBUG_INFO:
+			ALERT( at_console, "%s\n", message );
+			break;
+		case PxErrorCode::eDEBUG_WARNING:
+			ALERT( at_warning, "%s\n", message );
+			break;
+		case PxErrorCode::ePERF_WARNING:
+			ALERT( at_warning, "performance warning: %s\n", message );
+			break;
+		case PxErrorCode::eABORT:
+			ALERT( at_error, "abort: %s\n", message );
+			break;
+		default:
+			ALERT( at_error, "unknown error: %s\n", message );
+			break;
+		}
+	}
+} gErrorCallback;
+
+/*
 class DebugRenderer
 {
 public:
@@ -157,8 +201,8 @@ public:
 		}
 	}
 } gContactReport;
-
-void CPhysicNovodex :: InitPhysic( void )
+*/
+void CPhysicNovodex::InitPhysic( void )
 {
 	if( m_pPhysics )
 	{
@@ -185,7 +229,17 @@ void CPhysicNovodex :: InitPhysic( void )
 		}
 	}
 
-	m_pPhysics = pNxCreatePhysicsSDK( NX_PHYSICS_SDK_VERSION, NULL, &m_ErrorStream, NxPhysicsSDKDesc(), NULL );
+	m_pFoundation = pPxCreateFoundation( PX_PHYSICS_VERSION, m_Allocator, gErrorCallback );
+
+	if( !m_pFoundation )
+	{
+		ALERT( at_error, "InitPhysic: failed to create goundation\n" );
+		Sys_FreeLibrary( &hPhysics );
+		GameInitNullPhysics();
+		return;
+	}
+
+	m_pPhysics = pPxCreatePhysics( PX_PHYSICS_VERSION, *m_pFoundation, PxTolerancesScale(), false, NULL );
 
 	if( !m_pPhysics )
 	{
@@ -195,22 +249,15 @@ void CPhysicNovodex :: InitPhysic( void )
 		return;
 	}
 
-	m_pCooking = pNxGetCookingLib( NX_PHYSICS_SDK_VERSION );
+	m_pCooking = pPxCreateCooking( PX_PHYSICS_VERSION, *m_pFoundation, PxCookingParams( m_pPhysics->getTolerancesScale() ) );
 
 	if( !m_pCooking )
 	{
 		ALERT( at_warning, "InitPhysic: failed to initalize cooking library\n" );
 	}
-
-	m_pUtils = pNxGetUtilLib();
-
-	if( !m_pUtils )
-	{
-		ALERT( at_warning, "InitPhysic: failed to initalize util library\n" );
-	}
-
+	
 	float maxSpeed = CVAR_GET_FLOAT( "sv_maxspeed" );
-
+/*
 	m_pPhysics->setParameter( NX_SKIN_WIDTH, 0.25f );
 
 	m_pPhysics->setParameter( NX_VISUALIZATION_SCALE, 1.0f );
@@ -224,66 +271,60 @@ void CPhysicNovodex :: InitPhysic( void )
 	m_pPhysics->setParameter( NX_DEFAULT_SLEEP_ANG_VEL_SQUARED, 5.0f );
 	m_pPhysics->setParameter( NX_VISUALIZE_FORCE_FIELDS, 1.0f );
 	m_pPhysics->setParameter( NX_ADAPTIVE_FORCE, 0.0f );
-
+*/
 	// create a scene
-	NxSceneDesc sceneDesc;
+	PxSceneDesc sceneDesc( m_pPhysics->getTolerancesScale() );
 
-	sceneDesc.userContactReport = &gContactReport;
-	sceneDesc.gravity = NxVec3( 0.0f, 0.0f, -800.0f );
-	sceneDesc.maxTimestep = (1.0f / 150.0f);
-	sceneDesc.bpType = NX_BP_TYPE_SAP_MULTI;
-	sceneDesc.maxIter = SOLVER_ITERATION_COUNT;
-	sceneDesc.dynamicStructure = NX_PRUNING_DYNAMIC_AABB_TREE;
+	//sceneDesc.userContactReport = &gContactReport;
+	sceneDesc.gravity = PxVec3( 0.0f, 0.0f, -800.0f );
+	//sceneDesc.maxTimestep = (1.0f / 150.0f);
+	sceneDesc.broadPhaseType = PxBroadPhaseType::eSAP;
+	//sceneDesc.maxIter = SOLVER_ITERATION_COUNT;
+	sceneDesc.dynamicStructure = PxPruningStructureType::eDYNAMIC_AABB_TREE;
 
-	worldBounds.min = NxVec3( -32768, -32768, -32768 );
-	worldBounds.max = NxVec3(  32768,  32768,  32768 );
-	sceneDesc.maxBounds = &worldBounds;
-	sceneDesc.nbGridCellsX = 8;
-	sceneDesc.nbGridCellsY = 8;
-	sceneDesc.upAxis = 2;
+	worldBounds.minimum = PxVec3( -32768, -32768, -32768 );
+	worldBounds.maximum = PxVec3(  32768,  32768,  32768 );
+
+	sceneDesc.sanityBounds = worldBounds;
+	//sceneDesc.nbGridCellsX = 8;
+	//sceneDesc.nbGridCellsY = 8;
+	//sceneDesc.upAxis = 2;
 
 	m_pScene = m_pPhysics->createScene( sceneDesc );
+	//m_pScene->setFlag( PxSceneFlag::eADAPTIVE_FORCE, true );
 
 	// notify on all contacts:
-	m_pScene->setActorGroupPairFlags( 0, 0, NX_NOTIFY_ON_TOUCH );
+	//m_pScene->setActorGroupPairFlags( 0, 0, NX_NOTIFY_ON_TOUCH );
 
-	NxMaterial *defaultMaterial = m_pScene->getMaterialFromIndex( 0 ); 
-	defaultMaterial->setStaticFriction( 0.5f );
-	defaultMaterial->setDynamicFriction( 0.5f );
-	defaultMaterial->setRestitution( 0.0f );
+	PxMaterial *defaultMaterial = m_pPhysics->createMaterial( 0.5f, 0.5f, 0.0f ); 
 
-	NxMaterialDesc conveyorMat;
-	NxMaterial *conveyorMaterial = m_pScene->createMaterial( conveyorMat ); 
-	conveyorMaterial->setStaticFriction( 1.0f );
-	conveyorMaterial->setDynamicFriction( 1.0f );
-	conveyorMaterial->setRestitution( 0.0f );
-	conveyorMaterial->setDirOfAnisotropy( NxVec3( 0, 0, 1 ));
-	conveyorMaterial->setFlags( NX_MF_ANISOTROPIC );
+	PxMaterial *conveyorMaterial = m_pPhysics->createMaterial( 1.0f, 1.0f, 0.0f ); 
+	//conveyorMaterial->setDirOfAnisotropy( NxVec3( 0, 0, 1 ));
+	//conveyorMaterial->setFlags( NX_MF_ANISOTROPIC );
 
 	m_fNeedFetchResults = FALSE;
 }
 
-void CPhysicNovodex :: FreePhysic( void )
-{
-	if( !m_pPhysics ) return;
-
-	if( m_pCooking )
-		m_pCooking->NxCloseCooking();
-
-	m_pPhysics->releaseScene( *m_pScene );
-	pNxReleasePhysicsSDK( m_pPhysics );
+void CPhysicNovodex::FreePhysic( void )
+{	
+	if ( m_pScene ) m_pScene->release();
+	if ( m_pPhysics ) m_pPhysics->release();
+	if ( m_pCooking ) m_pCooking->release();
+	if ( m_pFoundation ) m_pFoundation->release();
 
 	Sys_FreeLibrary( &hPhysics );
-	m_pPhysics = NULL;
 	m_pScene = NULL;
+	m_pPhysics = NULL;
+	m_pCooking = NULL;
+	m_pFoundation = NULL;
 }
 
-void *CPhysicNovodex :: GetUtilLibrary( void )
+void *CPhysicNovodex::GetUtilLibrary( void )
 {
-	return (void *)m_pUtils;
+	return NULL; // doesn't exist anymore
 }
 
-void CPhysicNovodex :: Update( float flTime )
+void CPhysicNovodex::Update( float flTime )
 {
 	if( !m_pScene || GET_SERVER_STATE() != SERVER_ACTIVE )
 		return;
@@ -296,8 +337,8 @@ void CPhysicNovodex :: Update( float flTime )
 		if( g_psv_gravity->value > 800.0f )
 			CVAR_SET_FLOAT( "sv_gravity", 800.0f );
 
-		NxVec3 gravity;
-		m_pScene->getGravity( gravity );
+		PxVec3 gravity;
+		gravity = m_pScene->getGravity();
 
 		if( gravity.z != -( g_psv_gravity->value ))
 		{
@@ -310,8 +351,8 @@ void CPhysicNovodex :: Update( float flTime )
 	if( g_sync_physic.value )
 	{
 		m_pScene->simulate( flTime );
-		m_pScene->flushStream();
-		m_pScene->fetchResults( NX_RIGID_BODY_FINISHED, true );
+		//m_pScene->flushStream();
+		//m_pScene->fetchResults( NX_RIGID_BODY_FINISHED, true );
 	}
 	else
 	{
@@ -323,15 +364,15 @@ void CPhysicNovodex :: Update( float flTime )
 	}
 }
 
-void CPhysicNovodex :: EndFrame( void )
+void CPhysicNovodex::EndFrame( void )
 {
 	if( !m_pScene || GET_SERVER_STATE() != SERVER_ACTIVE )
 		return;
 
 	if( m_fNeedFetchResults )
 	{
-		m_pScene->flushStream();
-		m_pScene->fetchResults( NX_RIGID_BODY_FINISHED, true );
+		//m_pScene->flushStream();
+		//m_pScene->fetchResults( NX_RIGID_BODY_FINISHED, true );
 		m_fNeedFetchResults = FALSE;
 	}
 
@@ -339,31 +380,31 @@ void CPhysicNovodex :: EndFrame( void )
 	if( !p_speeds || p_speeds->value <= 0.0f )
 		return;
 
-	NxSceneStats stats;
-	m_pScene->getStats( stats );
+	PxSimulationStatistics stats;
+	m_pScene->getSimulationStatistics( stats );
 
 	switch( (int)p_speeds->value )
 	{
 	case 1:
-		Q_snprintf( p_speeds_msg, sizeof( p_speeds_msg ), "%3i active bodies, %3i actors\n%3i static shapes, %3i dynamic shapes",
-		stats.numDynamicActorsInAwakeGroups, stats.numActors, stats.numStaticShapes, stats.numDynamicShapes );
+		Q_snprintf( p_speeds_msg, sizeof( p_speeds_msg ), "%3i active dynamic bodies\n%3i static bodies\n%3i dynamic bodies",
+		stats.nbActiveDynamicBodies, stats.nbStaticBodies, stats.nbDynamicBodies );
 		break;		
 	}
 }
 
-void CPhysicNovodex :: RemoveBody( struct edict_s *pEdict )
+void CPhysicNovodex::RemoveBody( struct edict_s *pEdict )
 {
 	if( !m_pScene || !pEdict || pEdict->free )
 		return; // scene purge all the objects automatically
 
 	CBaseEntity *pEntity = CBaseEntity::Instance( pEdict );
-	NxActor *pActor = ActorFromEntity( pEntity );
+	PxActor *pActor = ActorFromEntity( pEntity );
 
-	if( pActor ) m_pScene->releaseActor( *pActor );
+	if( pActor ) pActor->release();
 	pEntity->m_pUserData = NULL;
 }
 
-NxConvexMesh *CPhysicNovodex :: ConvexMeshFromBmodel( entvars_t *pev, int modelindex )
+PxConvexMesh *CPhysicNovodex::ConvexMeshFromBmodel( entvars_t *pev, int modelindex )
 {
 	if( !m_pCooking )
 		return NULL; // don't spam console about missed NxCooking.dll
@@ -391,7 +432,7 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromBmodel( entvars_t *pev, int modeli
 	}
 
 	int numVerts = 0, totalVerts = 0;
-	NxConvexMesh *pHull = NULL;
+	PxConvexMesh *pHull = NULL;
 	msurface_t *psurf;
 	Vector *verts;
 	int i, j;
@@ -415,15 +456,14 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromBmodel( entvars_t *pev, int modeli
 		}
 	}
 
-	NxConvexMeshDesc meshDesc;
-	meshDesc.points = verts;
-	meshDesc.pointStrideBytes = sizeof(Vector);
-	meshDesc.numVertices = numVerts;
-	meshDesc.flags |= NX_CF_COMPUTE_CONVEX;
-	m_pCooking->NxInitCooking();
+	PxConvexMeshDesc meshDesc;
+	meshDesc.points.data = verts;
+	meshDesc.points.stride = sizeof(Vector);
+	meshDesc.points.count = numVerts;
+	//meshDesc.flags |= NX_CF_COMPUTE_CONVEX;
 
-	MemoryWriteBuffer buf;
-	bool status = m_pCooking->NxCookConvexMesh( meshDesc, buf );
+	PxDefaultMemoryOutputStream buf;
+	bool status = m_pCooking->cookConvexMesh( meshDesc, buf );
 	delete [] verts;
 
 	if( !status )
@@ -432,13 +472,14 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromBmodel( entvars_t *pev, int modeli
 		return NULL;
 	}
 
-	pHull = m_pPhysics->createConvexMesh( MemoryReadBuffer( buf.data ));
+	PxDefaultMemoryInputData input( buf.getData(), buf.getSize() );
+	pHull = m_pPhysics->createConvexMesh( input );
 	if( !pHull ) ALERT( at_error, "failed to create convex mesh from %s\n", bmodel->name );
 
 	return pHull;
 }
 
-NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromBmodel( entvars_t *pev, int modelindex )
+PxTriangleMesh *CPhysicNovodex::TriangleMeshFromBmodel( entvars_t *pev, int modelindex )
 {
 	if( !m_pCooking )
 		return NULL; // don't spam console about missed NxCooking.dll
@@ -473,7 +514,7 @@ NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromBmodel( entvars_t *pev, int mo
 	}
 
 	int i, numElems = 0, totalElems = 0;
-	NxTriangleMesh *pMesh = NULL;
+	PxTriangleMesh *pMesh = NULL;
 	msurface_t *psurf;
 
 	// compute vertexes count
@@ -484,7 +525,7 @@ NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromBmodel( entvars_t *pev, int mo
 	}
 
 	// create a temp indices array
-	NxU32 *indices = new NxU32[totalElems * 3];
+	PxU32 *indices = new PxU32[totalElems * 3];
 
 	for( i = 0; i < bmodel->nummodelsurfaces; i++ )
 	{
@@ -502,18 +543,17 @@ NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromBmodel( entvars_t *pev, int mo
 		}
 	}
 
-	NxTriangleMeshDesc meshDesc;
-	meshDesc.points = (const NxPoint*)&(bmodel->vertexes[0].position);	// pointer to all vertices in the map
-	meshDesc.pointStrideBytes = sizeof( mvertex_t );
-	meshDesc.triangleStrideBytes = 3 * sizeof( NxU32 );
-	meshDesc.numVertices = bmodel->numvertexes;
-	meshDesc.numTriangles = numElems;
-	meshDesc.triangles = indices;
-	meshDesc.flags = 0;
-	m_pCooking->NxInitCooking();
+	PxTriangleMeshDesc meshDesc;
+	meshDesc.points.data = (const PxVec3*)&(bmodel->vertexes[0].position);	// pointer to all vertices in the map
+	meshDesc.points.stride = sizeof( mvertex_t );
+	meshDesc.triangles.stride = 3 * sizeof( PxU32 );
+	meshDesc.points.count = bmodel->numvertexes;
+	meshDesc.triangles.count = numElems;
+	meshDesc.triangles.data = indices;
+	//meshDesc.flags = 0;
 
-	MemoryWriteBuffer buf;
-	bool status = m_pCooking->NxCookTriangleMesh( meshDesc, buf );
+	PxDefaultMemoryOutputStream buf;
+	bool status = m_pCooking->cookTriangleMesh( meshDesc, buf );
 	delete [] indices;
 
 	if( !status )
@@ -522,13 +562,14 @@ NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromBmodel( entvars_t *pev, int mo
 		return NULL;
 	}
 
-	pMesh = m_pPhysics->createTriangleMesh( MemoryReadBuffer( buf.data ));
+	PxDefaultMemoryInputData input( buf.getData(), buf.getSize() );
+	pMesh = m_pPhysics->createTriangleMesh( input );
 	if( !pMesh ) ALERT( at_error, "failed to create triangle mesh from %s\n", bmodel->name );
 
 	return pMesh;
 }
 
-void CPhysicNovodex :: StudioCalcBoneQuaterion( mstudiobone_t *pbone, mstudioanim_t *panim, Vector4D &q )
+void CPhysicNovodex::StudioCalcBoneQuaterion( mstudiobone_t *pbone, mstudioanim_t *panim, Vector4D &q )
 {
 	mstudioanimvalue_t *panimvalue;
 	Radian angle;
@@ -550,7 +591,7 @@ void CPhysicNovodex :: StudioCalcBoneQuaterion( mstudiobone_t *pbone, mstudioani
 	AngleQuaternion( angle, q );
 }
 
-void CPhysicNovodex :: StudioCalcBonePosition( mstudiobone_t *pbone, mstudioanim_t *panim, Vector &pos )
+void CPhysicNovodex::StudioCalcBonePosition( mstudiobone_t *pbone, mstudioanim_t *panim, Vector &pos )
 {
 	mstudioanimvalue_t *panimvalue;
 
@@ -566,7 +607,7 @@ void CPhysicNovodex :: StudioCalcBonePosition( mstudiobone_t *pbone, mstudioanim
 	}
 }
 
-NxConvexMesh *CPhysicNovodex :: ConvexMeshFromStudio( entvars_t *pev, int modelindex )
+PxConvexMesh *CPhysicNovodex::ConvexMeshFromStudio( entvars_t *pev, int modelindex )
 {
 	if( UTIL_GetModelType( modelindex ) != mod_studio )
 	{
@@ -584,14 +625,15 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromStudio( entvars_t *pev, int modeli
 	}
 
 	char szHullFilename[MAX_PATH];
-	NxConvexMesh *pHull = NULL;
+	PxConvexMesh *pHull = NULL;
 
 	HullNameForModel( smodel->name, szHullFilename, sizeof( szHullFilename ));
 
 	if( CheckFileTimes( smodel->name, szHullFilename ))
 	{
 		// hull is never than studiomodel. Trying to load it
-		pHull = m_pPhysics->createConvexMesh( UserStream( szHullFilename, true ));
+		PxDefaultFileInputData input( szHullFilename );
+		pHull = m_pPhysics->createConvexMesh( input );
 
 		if( !pHull )
 		{
@@ -663,7 +705,7 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromStudio( entvars_t *pev, int modeli
 	Vector *m_verts = new Vector[psubmodel->numverts];
 	byte *pvertbone = ((byte *)phdr + psubmodel->vertinfoindex);
 	Vector *verts = new Vector[psubmodel->numverts * 8];	// allocate temporary vertices array
-	NxU32 *indices = new NxU32[psubmodel->numverts * 24];
+	PxU32 *indices = new PxU32[psubmodel->numverts * 24];
 	int numVerts = 0, numElems = 0;
 	Vector tmp;
 
@@ -728,17 +770,17 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromStudio( entvars_t *pev, int modeli
 		}
 	}
 
-	NxConvexMeshDesc meshDesc;
-	meshDesc.numTriangles = numElems / 3;
-	meshDesc.pointStrideBytes = sizeof(Vector);
-	meshDesc.triangleStrideBytes	= 3 * sizeof( NxU32 );
-	meshDesc.points = verts;
-	meshDesc.triangles = indices;
-	meshDesc.numVertices = numVerts;
-	meshDesc.flags |= NX_CF_COMPUTE_CONVEX;
+	PxConvexMeshDesc meshDesc;
+	meshDesc.polygons.count = numElems / 3;
+	meshDesc.points.stride = sizeof(Vector);
+	meshDesc.polygons.stride	= 3 * sizeof( PxU32 );
+	meshDesc.points.data = verts;
+	meshDesc.polygons.data = indices;
+	meshDesc.points.count = numVerts;
+	//meshDesc.flags |= NX_CF_COMPUTE_CONVEX;
 
-	m_pCooking->NxInitCooking();
-	bool status = m_pCooking->NxCookConvexMesh( meshDesc, UserStream( szHullFilename, false ));
+	PxDefaultFileOutputStream buf( szHullFilename );
+	bool status = m_pCooking->cookConvexMesh( meshDesc, buf );
 
 	delete [] verts;
 	delete [] m_verts;
@@ -750,13 +792,14 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromStudio( entvars_t *pev, int modeli
 		return NULL;
 	}
 
-	pHull = m_pPhysics->createConvexMesh( UserStream( szHullFilename, true ));
+	PxDefaultFileInputData input( szHullFilename );
+	pHull = m_pPhysics->createConvexMesh( input );
 	if( !pHull ) ALERT( at_error, "failed to create convex mesh from %s\n", smodel->name );
 
 	return pHull;
 }
 
-NxTriangleMesh *CPhysicNovodex::TriangleMeshFromStudio(entvars_t *pev, int modelindex)
+PxTriangleMesh *CPhysicNovodex::TriangleMeshFromStudio(entvars_t *pev, int modelindex)
 {
 	if (UTIL_GetModelType(modelindex) != mod_studio)
 	{
@@ -792,14 +835,15 @@ NxTriangleMesh *CPhysicNovodex::TriangleMeshFromStudio(entvars_t *pev, int model
 	}
 
 	char szMeshFilename[MAX_PATH];
-	NxTriangleMesh *pMesh = NULL;
+	PxTriangleMesh *pMesh = NULL;
 
 	MeshNameForModel(smodel->name, szMeshFilename, sizeof(szMeshFilename));
 
 	if (CheckFileTimes(smodel->name, szMeshFilename) && !m_fWorldChanged)
 	{
 		// hull is never than studiomodel. Trying to load it
-		pMesh = m_pPhysics->createTriangleMesh(UserStream(szMeshFilename, true));
+		PxDefaultFileInputData input( szMeshFilename );
+		pMesh = m_pPhysics->createTriangleMesh( input );
 
 		if (!pMesh)
 		{
@@ -878,7 +922,7 @@ NxTriangleMesh *CPhysicNovodex::TriangleMeshFromStudio(entvars_t *pev, int model
 	}
 
 	Vector *verts = new Vector[totalVertSize * 8]; // allocate temporary vertices array
-	NxU32 *indices = new NxU32[totalVertSize * 24];
+	PxU32 *indices = new PxU32[totalVertSize * 24];
 	int numVerts = 0, numElems = 0;
 	Vector tmp;
 
@@ -968,17 +1012,17 @@ NxTriangleMesh *CPhysicNovodex::TriangleMeshFromStudio(entvars_t *pev, int model
 		delete[] m_verts;
 	}
 
-	NxTriangleMeshDesc meshDesc;
-	meshDesc.numTriangles = numElems / 3;
-	meshDesc.pointStrideBytes = sizeof(Vector);
-	meshDesc.triangleStrideBytes = 3 * sizeof(NxU32);
-	meshDesc.points = verts;
-	meshDesc.triangles = indices;
-	meshDesc.numVertices = numVerts;
-	meshDesc.flags = 0;
+	PxTriangleMeshDesc meshDesc;
+	meshDesc.triangles.count = numElems / 3;
+	meshDesc.points.stride = sizeof(Vector);
+	meshDesc.triangles.stride = 3 * sizeof(PxU32);
+	meshDesc.points.data = verts;
+	meshDesc.triangles.data = indices;
+	meshDesc.points.count = numVerts;
+	//meshDesc.flags = 0;
 
-	m_pCooking->NxInitCooking();
-	bool status = m_pCooking->NxCookTriangleMesh(meshDesc, UserStream(szMeshFilename, false));
+	PxDefaultFileOutputStream buf( szMeshFilename );
+	bool status = m_pCooking->cookTriangleMesh(meshDesc, buf );
 
 	delete[] verts;
 	delete[] indices;
@@ -989,13 +1033,14 @@ NxTriangleMesh *CPhysicNovodex::TriangleMeshFromStudio(entvars_t *pev, int model
 		return NULL;
 	}
 
-	pMesh = m_pPhysics->createTriangleMesh(UserStream(szMeshFilename, true));
+	PxDefaultFileInputData input( szMeshFilename );
+	pMesh = m_pPhysics->createTriangleMesh( input );
 	if (!pMesh) ALERT(at_error, "failed to create triangle mesh from %s\n", smodel->name);
 
 	return pMesh;
 }
 
-NxConvexMesh *CPhysicNovodex :: ConvexMeshFromEntity( CBaseEntity *pObject )
+PxConvexMesh *CPhysicNovodex::ConvexMeshFromEntity( CBaseEntity *pObject )
 {
 	if( !pObject || !m_pPhysics )
 		return NULL;
@@ -1009,7 +1054,7 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromEntity( CBaseEntity *pObject )
 		return NULL;
 	}
 
-	NxConvexMesh *pCollision = NULL;
+	PxConvexMesh *pCollision = NULL;
 
 	// call the apropriate loader
 	switch( model->type )
@@ -1029,7 +1074,7 @@ NxConvexMesh *CPhysicNovodex :: ConvexMeshFromEntity( CBaseEntity *pObject )
 	return pCollision;
 }
 
-NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromEntity( CBaseEntity *pObject )
+PxTriangleMesh *CPhysicNovodex::TriangleMeshFromEntity( CBaseEntity *pObject )
 {
 	if( !pObject || !m_pPhysics )
 		return NULL;
@@ -1043,7 +1088,7 @@ NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromEntity( CBaseEntity *pObject )
 		return NULL;
 	}
 
-	NxTriangleMesh *pCollision = NULL;
+	PxTriangleMesh *pCollision = NULL;
 
 	// call the apropriate loader
 	switch( model->type )
@@ -1063,7 +1108,7 @@ NxTriangleMesh *CPhysicNovodex :: TriangleMeshFromEntity( CBaseEntity *pObject )
 	return pCollision;
 }
 
-NxActor *CPhysicNovodex :: ActorFromEntity( CBaseEntity *pObject )
+PxActor *CPhysicNovodex::ActorFromEntity( CBaseEntity *pObject )
 {
 	if( FNullEnt( pObject ) || !pObject->m_pUserData )
 		return NULL;
@@ -1074,10 +1119,10 @@ NxActor *CPhysicNovodex :: ActorFromEntity( CBaseEntity *pObject )
 		return pVehicle->getActor();
 	}
 #endif
-	return (NxActor *)pObject->m_pUserData;
+	return (PxActor *)pObject->m_pUserData;
 }
 
-CBaseEntity *CPhysicNovodex :: EntityFromActor( NxActor *pObject )
+CBaseEntity *CPhysicNovodex::EntityFromActor( PxActor *pObject )
 {
 	if( !pObject || !pObject->userData )
 		return NULL;
@@ -1085,24 +1130,24 @@ CBaseEntity *CPhysicNovodex :: EntityFromActor( NxActor *pObject )
 	return CBaseEntity::Instance( (edict_t *)pObject->userData );
 }
 
-void *CPhysicNovodex :: CreateBodyFromEntity( CBaseEntity *pObject )
+void *CPhysicNovodex::CreateBodyFromEntity( CBaseEntity *pObject )
 {
-	NxConvexMesh *pCollision = ConvexMeshFromEntity( pObject );
+	PxConvexMesh *pCollision = ConvexMeshFromEntity( pObject );
 	if( !pCollision ) return NULL;
 
-	NxBodyDesc BodyDesc;
-	NxActorDesc ActorDesc;
-	NxConvexShapeDesc meshShapeDesc;
-	BodyDesc.flags = NX_BF_VISUALIZATION|NX_BF_FILTER_SLEEP_VEL;
-	BodyDesc.solverIterationCount = SOLVER_ITERATION_COUNT;
+	//BodyDesc.flags = NX_BF_VISUALIZATION|NX_BF_FILTER_SLEEP_VEL;
+	//ActorDesc.density = DENSITY_FACTOR;
 
-	ActorDesc.body = &BodyDesc;
-	ActorDesc.density = DENSITY_FACTOR;
-	ActorDesc.userData = pObject->edict();
+	//meshShapeDesc.meshData = pCollision;
+	//ActorDesc.shapes.pushBack( &meshShapeDesc );
 
-	meshShapeDesc.meshData = pCollision;
-	ActorDesc.shapes.pushBack( &meshShapeDesc );
-	NxActor *pActor = m_pScene->createActor( ActorDesc );
+	float mat[16];
+	matrix4x4( pObject->GetAbsOrigin(), pObject->GetAbsAngles(), 1.0f ).CopyToArray( mat );
+
+	PxMaterial *defaultMaterial = m_pPhysics->createMaterial( 0.5f, 0.5f, 0.0f ); 
+
+	PxRigidDynamic *pActor = m_pPhysics->createRigidDynamic( PxTransform( PxMat44( mat ) ) );
+	PxShape *pShape = PxRigidActorExt::createExclusiveShape( *pActor, PxConvexMeshGeometry( pCollision ), *defaultMaterial );
 
 	if( !pActor )
 	{
@@ -1110,18 +1155,16 @@ void *CPhysicNovodex :: CreateBodyFromEntity( CBaseEntity *pObject )
 		return NULL;
 	}
 
-	pActor->setName( pObject->GetClassname( ));
-
-	NxMat34 pose;
-	float mat[16];
-	matrix4x4( pObject->GetAbsOrigin(), pObject->GetAbsAngles(), 1.0f ).CopyToArray( mat );
-
-	pose.setColumnMajor44( mat );
-	pActor->setGlobalPose( pose );
-	pActor->setLinearVelocity( pObject->GetLocalVelocity() );
-	pActor->setAngularVelocity( pObject->GetLocalAvelocity() );
+	//pActor->setGlobalPose( pose );
+	pActor->setName( pObject->GetClassname() );
+	pActor->setSolverIterationCounts( SOLVER_ITERATION_COUNT );
+	pActor->userData = pObject->edict();
+	//pActor->setLinearVelocity( pObject->GetLocalVelocity() );
+	//pActor->setAngularVelocity( pObject->GetLocalAvelocity() );
 	pObject->m_iActorType = ACTOR_DYNAMIC;
 	pObject->m_pUserData = pActor;
+
+	m_pScene->addActor( *pActor );
 
 	return pActor;
 }
@@ -1133,29 +1176,26 @@ CreateBoxFromEntity
 used for characters: clients and monsters
 =================
 */
-void *CPhysicNovodex :: CreateBoxFromEntity( CBaseEntity *pObject )
+void *CPhysicNovodex::CreateBoxFromEntity( CBaseEntity *pObject )
 {
-	NxBodyDesc BodyDesc;
-	BodyDesc.flags |= NX_BF_KINEMATIC|NX_BF_VISUALIZATION;
+	//BodyDesc.flags |= NX_BF_KINEMATIC|NX_BF_VISUALIZATION;
 
-	NxActorDesc ActorDesc;
-	NxBoxShapeDesc boxDesc;
-	boxDesc.dimensions = pObject->pev->size * PADDING_FACTOR;
+	//boxDesc.dimensions = pObject->pev->size * PADDING_FACTOR;
 
-	ActorDesc.body = &BodyDesc;
-	ActorDesc.density = DENSITY_FACTOR;
-	ActorDesc.userData = pObject->edict();
-	ActorDesc.shapes.pushBack( &boxDesc );
+	//ActorDesc.body = &BodyDesc;
+	//ActorDesc.density = DENSITY_FACTOR;
+	//ActorDesc.userData = pObject->edict();
+	//ActorDesc.shapes.pushBack( &boxDesc );
 
-	NxActor *pActor = m_pScene->createActor( ActorDesc );
+	PxVec3 vecOffset = pObject->IsMonster() ? Vector( 0, 0, pObject->pev->maxs.z / 2.0f ) : g_vecZero;
+
+	PxRigidDynamic *pActor = m_pPhysics->createRigidDynamic( PxTransform( vecOffset ) );
 
 	if( !pActor )
 	{
-		ALERT( at_error, "failed to create rigidbody from entity %s\n", pObject->GetClassname( ));
+		ALERT( at_error, "failed to create rigidbody from entity %s\n", pObject->GetClassname() );
 		return NULL;
 	}
-
-	Vector vecOffset = (pObject->IsMonster()) ? Vector( 0, 0, pObject->pev->maxs.z / 2.0f ) : g_vecZero;
 
 	pActor->setName( pObject->GetClassname( ));
 	pActor->setGlobalPosition( pObject->GetAbsOrigin() + vecOffset );
@@ -1165,7 +1205,7 @@ void *CPhysicNovodex :: CreateBoxFromEntity( CBaseEntity *pObject )
 	return pActor;
 }
 
-void *CPhysicNovodex :: CreateKinematicBodyFromEntity( CBaseEntity *pObject )
+void *CPhysicNovodex::CreateKinematicBodyFromEntity( CBaseEntity *pObject )
 {
 	NxTriangleMesh *pCollision = TriangleMeshFromEntity( pObject );
 	if( !pCollision ) return NULL;
@@ -1186,7 +1226,7 @@ void *CPhysicNovodex :: CreateKinematicBodyFromEntity( CBaseEntity *pObject )
 	meshShapeDesc.meshData = pCollision;
 	ActorDesc.shapes.pushBack( &meshShapeDesc );
 	m_ErrorStream.hideWarning( true );
-	NxActor *pActor = m_pScene->createActor( ActorDesc );
+	PxActor *pActor = m_pScene->createActor( ActorDesc );
 	m_ErrorStream.hideWarning( false );
 
 	if( !pActor )
@@ -1209,7 +1249,7 @@ void *CPhysicNovodex :: CreateKinematicBodyFromEntity( CBaseEntity *pObject )
 	return pActor;
 }
 
-void *CPhysicNovodex :: CreateStaticBodyFromEntity( CBaseEntity *pObject )
+void *CPhysicNovodex::CreateStaticBodyFromEntity( CBaseEntity *pObject )
 {
 	NxTriangleMesh *pCollision = TriangleMeshFromEntity( pObject );
 	if( !pCollision ) return NULL;
@@ -1230,7 +1270,7 @@ void *CPhysicNovodex :: CreateStaticBodyFromEntity( CBaseEntity *pObject )
 		meshShapeDesc.materialIndex = 1;
 	meshShapeDesc.meshData = pCollision;
 	ActorDesc.shapes.pushBack( &meshShapeDesc );
-	NxActor *pActor = m_pScene->createActor( ActorDesc );
+	PxActor *pActor = m_pScene->createActor( ActorDesc );
 
 	if( !pActor )
 	{
@@ -1246,7 +1286,7 @@ void *CPhysicNovodex :: CreateStaticBodyFromEntity( CBaseEntity *pObject )
 	return pActor;
 }
 
-void *CPhysicNovodex :: CreateVehicle( CBaseEntity *pObject, string_t scriptName )
+void *CPhysicNovodex::CreateVehicle( CBaseEntity *pObject, string_t scriptName )
 {
 #if defined (HAS_PHYSIC_VEHICLE)
 	NxBoxShapeDesc	boxShapes[MAXSTUDIOBONES];
@@ -1397,7 +1437,7 @@ void *CPhysicNovodex :: CreateVehicle( CBaseEntity *pObject, string_t scriptName
 	vehicleDesc.steeringSteerPoint.set( 1.8 * scale, 0, 0 );
 	vehicleDesc.steeringTurnPoint.set( -1.5 * scale, 0, 0 );
 
-	NxVehicle *pVehicle = NxVehicle :: createVehicle( m_pScene, pObject, &vehicleDesc );
+	NxVehicle *pVehicle = NxVehicle::createVehicle( m_pScene, pObject, &vehicleDesc );
 
 	if( !pVehicle )
 	{
@@ -1434,7 +1474,7 @@ void *CPhysicNovodex :: CreateVehicle( CBaseEntity *pObject, string_t scriptName
 #endif
 }
 
-void CPhysicNovodex :: UpdateVehicle( CBaseEntity *pObject )
+void CPhysicNovodex::UpdateVehicle( CBaseEntity *pObject )
 {
 #if defined (HAS_PHYSIC_VEHICLE)
 	if( !pObject || pObject->m_iActorType != ACTOR_VEHICLE )
@@ -1475,21 +1515,21 @@ void CPhysicNovodex :: UpdateVehicle( CBaseEntity *pObject )
 #endif
 }
 
-bool CPhysicNovodex :: UpdateEntityPos( CBaseEntity *pEntity )
+bool CPhysicNovodex::UpdateEntityPos( CBaseEntity *pEntity )
 {
-	NxActor *pActor = ActorFromEntity( pEntity );
+	PxRigidActor *pActor = ActorFromEntity( pEntity )->is<PxRigidActor>();
 
-	if( !pActor || pActor->isSleeping( ))
+	if( !pActor || pActor->isSleeping() )
 		return false;
 
-	NxMat34 pose = pActor->getGlobalPose();
+	PxTransform pose = pActor->getGlobalPose();
 	float mat[16];
 
-	pose.getColumnMajor44( mat );
-	matrix4x4	m( mat );
+	//pose.getColumnMajor44( mat );
+	matrix4x4 mat( pose.p, pose.q );
 
-	Vector angles = m.GetAngles();
-	Vector origin = m.GetOrigin();
+	Vector angles = pose.p;
+	Vector origin = pose.q;
 
 	// store actor velocities too
 	pEntity->SetLocalVelocity( pActor->getLinearVelocity() );
@@ -1503,9 +1543,9 @@ bool CPhysicNovodex :: UpdateEntityPos( CBaseEntity *pEntity )
 	return true;
 }
 
-bool CPhysicNovodex :: UpdateActorPos( CBaseEntity *pEntity )
+bool CPhysicNovodex::UpdateActorPos( CBaseEntity *pEntity )
 {
-	NxActor *pActor = ActorFromEntity( pEntity );
+	PxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return false;
 
 	NxMat34 pose;
@@ -1526,14 +1566,14 @@ bool CPhysicNovodex :: UpdateActorPos( CBaseEntity *pEntity )
 	return true;
 }
 
-bool CPhysicNovodex :: IsBodySleeping( CBaseEntity *pEntity )
+bool CPhysicNovodex::IsBodySleeping( CBaseEntity *pEntity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return false;
 	return pActor->isSleeping();
 }
 
-void CPhysicNovodex :: UpdateEntityAABB( CBaseEntity *pEntity )
+void CPhysicNovodex::UpdateEntityAABB( CBaseEntity *pEntity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 
@@ -1618,7 +1658,7 @@ SaveBody
 collect all the info from generic actor
 ===============
 */
-void CPhysicNovodex :: SaveBody( CBaseEntity *pEntity )
+void CPhysicNovodex::SaveBody( CBaseEntity *pEntity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 
@@ -1654,7 +1694,7 @@ RestoreBody
 re-create shape, apply physic params
 ===============
 */						
-void *CPhysicNovodex :: RestoreBody( CBaseEntity *pEntity )
+void *CPhysicNovodex::RestoreBody( CBaseEntity *pEntity )
 {
 	// physics not initialized?
 	if( !m_pScene ) return NULL;
@@ -1750,7 +1790,7 @@ void *CPhysicNovodex :: RestoreBody( CBaseEntity *pEntity )
 	return pActor;
 }
 
-void CPhysicNovodex :: SetAngles( CBaseEntity *pEntity, const Vector &angles )
+void CPhysicNovodex::SetAngles( CBaseEntity *pEntity, const Vector &angles )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1761,7 +1801,7 @@ void CPhysicNovodex :: SetAngles( CBaseEntity *pEntity, const Vector &angles )
 	pActor->setGlobalOrientation( rot );
 }
 
-void CPhysicNovodex :: SetOrigin( CBaseEntity *pEntity, const Vector &origin )
+void CPhysicNovodex::SetOrigin( CBaseEntity *pEntity, const Vector &origin )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1769,7 +1809,7 @@ void CPhysicNovodex :: SetOrigin( CBaseEntity *pEntity, const Vector &origin )
 	pActor->setGlobalPosition( origin );
 }
 
-void CPhysicNovodex :: SetVelocity( CBaseEntity *pEntity, const Vector &velocity )
+void CPhysicNovodex::SetVelocity( CBaseEntity *pEntity, const Vector &velocity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1777,7 +1817,7 @@ void CPhysicNovodex :: SetVelocity( CBaseEntity *pEntity, const Vector &velocity
 	pActor->setLinearVelocity( velocity );
 }
 
-void CPhysicNovodex :: SetAvelocity( CBaseEntity *pEntity, const Vector &velocity )
+void CPhysicNovodex::SetAvelocity( CBaseEntity *pEntity, const Vector &velocity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1785,7 +1825,7 @@ void CPhysicNovodex :: SetAvelocity( CBaseEntity *pEntity, const Vector &velocit
 	pActor->setAngularVelocity( velocity );
 }
 
-void CPhysicNovodex :: MoveObject( CBaseEntity *pEntity, const Vector &finalPos )
+void CPhysicNovodex::MoveObject( CBaseEntity *pEntity, const Vector &finalPos )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1793,7 +1833,7 @@ void CPhysicNovodex :: MoveObject( CBaseEntity *pEntity, const Vector &finalPos 
 	pActor->moveGlobalPosition( finalPos );
 }
 
-void CPhysicNovodex :: RotateObject( CBaseEntity *pEntity, const Vector &finalAngle )
+void CPhysicNovodex::RotateObject( CBaseEntity *pEntity, const Vector &finalAngle )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1804,7 +1844,7 @@ void CPhysicNovodex :: RotateObject( CBaseEntity *pEntity, const Vector &finalAn
 	pActor->moveGlobalOrientation( rot );
 }
 
-void CPhysicNovodex :: SetLinearMomentum( CBaseEntity *pEntity, const Vector &velocity )
+void CPhysicNovodex::SetLinearMomentum( CBaseEntity *pEntity, const Vector &velocity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1812,7 +1852,7 @@ void CPhysicNovodex :: SetLinearMomentum( CBaseEntity *pEntity, const Vector &ve
 	pActor->setLinearMomentum( velocity );
 }
 
-void CPhysicNovodex :: AddImpulse( CBaseEntity *pEntity, const Vector &impulse, const Vector &position, float factor )
+void CPhysicNovodex::AddImpulse( CBaseEntity *pEntity, const Vector &impulse, const Vector &position, float factor )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1828,7 +1868,7 @@ void CPhysicNovodex :: AddImpulse( CBaseEntity *pEntity, const Vector &impulse, 
 	pActor->addForceAtPos( NxVec3(impulse * coeff), (NxVec3)position, NX_IMPULSE );
 }
 
-void CPhysicNovodex :: AddForce( CBaseEntity *pEntity, const Vector &force )
+void CPhysicNovodex::AddForce( CBaseEntity *pEntity, const Vector &force )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor ) return;
@@ -1836,7 +1876,7 @@ void CPhysicNovodex :: AddForce( CBaseEntity *pEntity, const Vector &force )
 	pActor->addForce( force, NX_FORCE );
 }
 
-void *CPhysicNovodex :: CreateForceField( CBaseEntity *pEntity, const Vector &force )
+void *CPhysicNovodex::CreateForceField( CBaseEntity *pEntity, const Vector &force )
 {
 	// create a forcefield kernel
 	NxForceFieldLinearKernelDesc	linearKernelDesc;
@@ -1861,7 +1901,7 @@ void *CPhysicNovodex :: CreateForceField( CBaseEntity *pEntity, const Vector &fo
 	return m_pScene->createForceField( fieldDesc );
 }
 
-int CPhysicNovodex :: FLoadTree( char *szMapName )
+int CPhysicNovodex::FLoadTree( char *szMapName )
 {
 	if( !szMapName || !*szMapName || !m_pPhysics )
 		return 0;
@@ -1897,7 +1937,7 @@ int CPhysicNovodex :: FLoadTree( char *szMapName )
 	return (m_pSceneMesh != NULL) ? TRUE : FALSE;
 }
 
-int CPhysicNovodex :: CheckBINFile( char *szMapName )
+int CPhysicNovodex::CheckBINFile( char *szMapName )
 {
 	if( !szMapName || !*szMapName || !m_pPhysics )
 		return FALSE;
@@ -1928,7 +1968,7 @@ int CPhysicNovodex :: CheckBINFile( char *szMapName )
 	return retValue;
 }
 
-void CPhysicNovodex :: HullNameForModel( const char *model, char *hullfile, size_t size )
+void CPhysicNovodex::HullNameForModel( const char *model, char *hullfile, size_t size )
 {
 	if( !model || !*model || !hullfile )
 		return;
@@ -1947,7 +1987,7 @@ void CPhysicNovodex :: HullNameForModel( const char *model, char *hullfile, size
 		Q_snprintf( hullfile, size, "cache/%s.hull", szModelBasename );
 }
 
-void CPhysicNovodex :: MeshNameForModel( const char *model, char *hullfile, size_t size )
+void CPhysicNovodex::MeshNameForModel( const char *model, char *hullfile, size_t size )
 {
 	if( !model || !*model || !hullfile )
 		return;
@@ -1970,7 +2010,7 @@ void CPhysicNovodex :: MeshNameForModel( const char *model, char *hullfile, size
 // hulls - convex hulls cooked with NxCookingConvexMesh routine and stored into cache\*.hull
 // meshes - triangle meshes cooked with NxCookingTriangleMesh routine and stored into cache\*.mesh
 //-----------------------------------------------------------------------------
-int CPhysicNovodex :: CheckFileTimes( const char *szFile1, const char *szFile2 )
+int CPhysicNovodex::CheckFileTimes( const char *szFile1, const char *szFile2 )
 {
 	if( !szFile1 || !*szFile1 || !szFile2 || !*szFile2 )
 		return FALSE;
@@ -1997,13 +2037,13 @@ int CPhysicNovodex :: CheckFileTimes( const char *szFile1, const char *szFile2 )
 //-----------------------------------------------------------------------------
 // assume m_pWorldModel is valid
 //-----------------------------------------------------------------------------
-int CPhysicNovodex :: ConvertEdgeToIndex( model_t *model, int edge )
+int CPhysicNovodex::ConvertEdgeToIndex( model_t *model, int edge )
 {
 	int e = model->surfedges[edge];
 	return (e > 0) ? model->edges[e].v[0] : model->edges[-e].v[1];
 }
 
-int CPhysicNovodex :: BuildCollisionTree( char *szMapName )
+int CPhysicNovodex::BuildCollisionTree( char *szMapName )
 {
 	if( !m_pPhysics )
 		return FALSE;
@@ -2092,7 +2132,7 @@ int CPhysicNovodex :: BuildCollisionTree( char *szMapName )
 	return (m_pSceneMesh != NULL) ? TRUE : FALSE;
 }
 
-void CPhysicNovodex :: SetupWorld( void )
+void CPhysicNovodex::SetupWorld( void )
 {
 	if( m_pSceneActor )
 		return;	// already loaded
@@ -2124,7 +2164,7 @@ void CPhysicNovodex :: SetupWorld( void )
 	pSceneShape->getWorldBounds( worldBounds );
 }
 	
-void CPhysicNovodex :: DebugDraw( void )
+void CPhysicNovodex::DebugDraw( void )
 {
 	if( !m_pPhysics || !m_pScene )
 		return;
@@ -2137,7 +2177,7 @@ void CPhysicNovodex :: DebugDraw( void )
 P_SpeedsMessage
 ===============
 */
-bool CPhysicNovodex :: P_SpeedsMessage( char *out, size_t size )
+bool CPhysicNovodex::P_SpeedsMessage( char *out, size_t size )
 {
 	if( !p_speeds || p_speeds->value <= 0.0f )
 		return false;
@@ -2153,7 +2193,7 @@ bool CPhysicNovodex :: P_SpeedsMessage( char *out, size_t size )
 SCR_RSpeeds
 ================
 */
-void CPhysicNovodex :: DrawPSpeeds( void )
+void CPhysicNovodex::DrawPSpeeds( void )
 {
 	char	msg[1024];
 	int	iScrWidth = CVAR_GET_FLOAT( "width" );
@@ -2186,7 +2226,7 @@ void CPhysicNovodex :: DrawPSpeeds( void )
 	}
 }
 
-void CPhysicNovodex :: FreeAllBodies( void )
+void CPhysicNovodex::FreeAllBodies( void )
 {
 	if( !m_pScene ) return;
 
@@ -2199,7 +2239,7 @@ void CPhysicNovodex :: FreeAllBodies( void )
 	m_pSceneActor = NULL;
 }
 
-void CPhysicNovodex :: TeleportCharacter( CBaseEntity *pEntity )
+void CPhysicNovodex::TeleportCharacter( CBaseEntity *pEntity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor || pActor->getNbShapes() <= 0 )
@@ -2215,7 +2255,7 @@ void CPhysicNovodex :: TeleportCharacter( CBaseEntity *pEntity )
 	pActor->setGlobalPosition( pEntity->GetAbsOrigin() + vecOffset );
 }
 
-void CPhysicNovodex :: TeleportActor( CBaseEntity *pEntity )
+void CPhysicNovodex::TeleportActor( CBaseEntity *pEntity )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor || pActor->getNbShapes() <= 0 )
@@ -2232,7 +2272,7 @@ void CPhysicNovodex :: TeleportActor( CBaseEntity *pEntity )
 	pActor->setGlobalPose( pose );
 }
 
-void CPhysicNovodex :: MoveCharacter( CBaseEntity *pEntity )
+void CPhysicNovodex::MoveCharacter( CBaseEntity *pEntity )
 {
 	if( !pEntity || pEntity->m_vecOldPosition == pEntity->pev->origin )
 		return;
@@ -2258,7 +2298,7 @@ void CPhysicNovodex :: MoveCharacter( CBaseEntity *pEntity )
 	pEntity->m_vecOldPosition = pEntity->GetAbsOrigin(); // update old position
 }
 
-void CPhysicNovodex :: MoveKinematic( CBaseEntity *pEntity )
+void CPhysicNovodex::MoveKinematic( CBaseEntity *pEntity )
 {
 	if( !pEntity || ( pEntity->pev->movetype != MOVETYPE_PUSH && pEntity->pev->movetype != MOVETYPE_PUSHSTEP ))
 		return;	// probably not a mover
@@ -2285,7 +2325,7 @@ void CPhysicNovodex :: MoveKinematic( CBaseEntity *pEntity )
 	pActor->moveGlobalPose( pose );
 }
 
-void CPhysicNovodex :: EnableCollision( CBaseEntity *pEntity, int fEnable )
+void CPhysicNovodex::EnableCollision( CBaseEntity *pEntity, int fEnable )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor || pActor->getNbShapes() <= 0 )
@@ -2303,7 +2343,7 @@ void CPhysicNovodex :: EnableCollision( CBaseEntity *pEntity, int fEnable )
 	}
 }
 
-void CPhysicNovodex :: MakeKinematic( CBaseEntity *pEntity, int fEnable )
+void CPhysicNovodex::MakeKinematic( CBaseEntity *pEntity, int fEnable )
 {
 	NxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor || pActor->getNbShapes() <= 0 )
@@ -2315,7 +2355,7 @@ void CPhysicNovodex :: MakeKinematic( CBaseEntity *pEntity, int fEnable )
 		pActor->clearBodyFlag( NX_BF_KINEMATIC );
 }
 
-void CPhysicNovodex :: SweepTest( CBaseEntity *pTouch, const Vector &start, const Vector &mins, const Vector &maxs, const Vector &end, trace_t *tr )
+void CPhysicNovodex::SweepTest( CBaseEntity *pTouch, const Vector &start, const Vector &mins, const Vector &maxs, const Vector &end, trace_t *tr )
 {
 	NxActor *pActor = ActorFromEntity( pTouch );
 
@@ -2469,14 +2509,14 @@ void CPhysicNovodex :: SweepTest( CBaseEntity *pTouch, const Vector &start, cons
 	}
 }
 
-void CPhysicNovodex :: SweepEntity( CBaseEntity *pEntity, const Vector &start, const Vector &end, TraceResult *tr )
+void CPhysicNovodex::SweepEntity( CBaseEntity *pEntity, const Vector &start, const Vector &end, TraceResult *tr )
 {
 	// make trace default
 	memset( tr, 0, sizeof( *tr ));
 	tr->flFraction = 1.0f;
 	tr->vecEndPos = end;
 
-	NxActor *pActor = ActorFromEntity( pEntity );
+	PxActor *pActor = ActorFromEntity( pEntity );
 	if( !pActor || pActor->getNbShapes() <= 0 || pEntity->pev->solid == SOLID_NOT )
 		return; // only dynamic solid objects can be traced
 
@@ -2634,4 +2674,4 @@ void CPhysicNovodex :: SweepEntity( CBaseEntity *pEntity, const Vector &start, c
 		tr->fAllSolid = true;
 }
 
-#endif//USE_PHYSICS_ENGINE
+#endif // USE_PHYSICS_ENGINE
